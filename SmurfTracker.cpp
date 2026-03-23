@@ -348,6 +348,14 @@ void SmurfTracker::InitializeCurrentPlayers()
 		details.mmr = std::to_string(static_cast<int>(std::round(gameWrapper->GetMMRWrapper().GetPlayerMMR(playerWrapper.GetUniqueIdWrapper(), 11))));// 11 is playlist ID for ranked 2v2
 		details.wins = "Waiting..."; // Default value	
 		details.profileLookupId = GetRlStatsProfileLookupId(uniqueID, details.playerName);
+		if (const auto cachedWins = matchWinsCache.find(details.profileLookupId); cachedWins != matchWinsCache.end()) {
+			details.wins = cachedWins->second;
+			details.requested = true;
+		}
+		else if (matchRequestedLookupIds.count(details.profileLookupId) > 0) {
+			details.wins = kWinsSearching;
+			details.requested = true;
+		}
 
 		// Find separators
 		size_t firstSeparator = uniqueIDString.find('|');
@@ -405,6 +413,8 @@ void SmurfTracker::InitializeCurrentPlayers()
 void SmurfTracker::ClearCurrentPlayers()
 {
 	currentPlayers.clear();
+	matchWinsCache.clear();
+	matchRequestedLookupIds.clear();
 }
 
 void SmurfTracker::UpdatePlayerList() {
@@ -523,11 +533,15 @@ void SmurfTracker::HTTPRequest()
 			if (processedPlayers->count(lookupId)) {
 				continue; // Skip already processed players
 			}
+			if (matchRequestedLookupIds.count(lookupId) > 0) {
+				continue; // Skip players already requested during this match
+			}
 			if (player.requested) {
 				continue; // Skip players that have already been requested
 			}
 
 			processedPlayers->insert(lookupId);
+			matchRequestedLookupIds.insert(lookupId);
 			player.requested = true;
 
 			std::string targetUrl = BuildRlStatsProfileUrl(player);
@@ -563,6 +577,7 @@ void SmurfTracker::HTTPRequest()
 								updatedAnyPlayers = true;
 							}
 						}
+						matchWinsCache[lookupId] = winsValue;
 
 						if (result.outcome == RlStatsOutcome::Success) {
 							LOG("Resolved RLStats wins for lookupId " + lookupId + ": " + result.wins);

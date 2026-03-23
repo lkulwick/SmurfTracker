@@ -4,6 +4,8 @@
 #include "bakkesmod/plugin/bakkesmodplugin.h"
 #include "bakkesmod/plugin/pluginwindow.h"
 #include "bakkesmod/plugin/PluginSettingsWindow.h"
+#include <map>
+#include <set>
 #include <string>
 #include <vector>
 #include <fstream>
@@ -48,6 +50,8 @@ class SmurfTracker : public BakkesMod::Plugin::BakkesModPlugin
 	bool checkTeammates;
 	bool checkSelf;
 	std::vector<PlayerDetails> currentPlayers;
+	std::map<std::string, std::string> matchWinsCache;
+	std::set<std::string> matchRequestedLookupIds;
 	std::ofstream logFile;
 	std::vector<std::string> blueTeam;
 	std::vector<std::string> orangeTeam;
