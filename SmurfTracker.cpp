@@ -213,12 +213,11 @@ void SmurfTracker::InitializeCurrentPlayers()
 		details.platform = platform;
 
 		LOG(
-			"Resolved RLStats lookup for {0}: platform={1}, lookupId={2}, uid={3}, idString={4}",
-			details.playerName,
-			details.platform,
-			details.profileLookupId,
-			std::to_string(uniqueID.GetUID()),
-			uniqueIDString
+			"Resolved RLStats lookup for " + details.playerName +
+			": platform=" + details.platform +
+			", lookupId=" + details.profileLookupId +
+			", uid=" + std::to_string(uniqueID.GetUID()) +
+			", idString=" + uniqueIDString
 		);
 
 		// If this is a main player, store the details

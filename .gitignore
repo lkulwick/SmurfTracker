@@ -316,6 +316,12 @@ paket-files/
 __pycache__/
 *.pyc
 
+# SmurfTracker local build artifacts
+/plugins/*.dll
+/plugins/*.lib
+/plugins/*.exp
+/build/
+
 # Cake - Uncomment if you are using it
 # tools/**
 # !tools/packages.config
@@ -361,3 +367,6 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+plugins/SmurfTracker.lib
+plugins/SmurfTracker.dll
+plugins/SmurfTracker.exp
