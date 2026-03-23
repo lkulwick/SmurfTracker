@@ -47,7 +47,6 @@ class SmurfTracker : public BakkesMod::Plugin::BakkesModPlugin
 	int selectedMode; // displayed mode chosen by combo box
 	bool checkTeammates;
 	bool checkSelf;
-	std::string ipAddress; // IP address of endpoint
 	std::vector<PlayerDetails> currentPlayers;
 	std::ofstream logFile;
 	std::vector<std::string> blueTeam;

@@ -29,21 +29,7 @@ void SmurfTracker::RenderSettings() {
 
     ImGui::Separator();
     ImGui::TextUnformatted("Wins mode settings:");
-
-    // IP address input of endpoint
-    CVarWrapper ipCvar = cvarManager->getCvar("SmurfTracker_ip");
-    if (!ipCvar) { return; }
-    char ip[16] = ""; // Buffer to store IP address
-    std::string currentIP = ipCvar.getStringValue();
-    strncpy(ip, currentIP.c_str(), sizeof(ip));
-    ip[sizeof(ip) - 1] = '\0'; // Ensure null-termination
-
-    if (ImGui::InputText("IP Address", ip, IM_ARRAYSIZE(ip))) {
-        ipCvar.setValue(std::string(ip));
-    }
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Set the IP address of the SmurfTracker endpoint");
-    }
+    ImGui::TextWrapped("Wins are fetched directly from RLStats. No local shim or Docker container is required.");
 
     ImGui::TextUnformatted("Does not work yet:");
     CVarWrapper checkTeammatesCvar = cvarManager->getCvar("SmurfTracker_check_teammates");

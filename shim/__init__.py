@@ -1,1 +1,0 @@
-"""SmurfTracker shim package."""

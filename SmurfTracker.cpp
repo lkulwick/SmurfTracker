@@ -1,7 +1,12 @@
 #include "pch.h"
 #include "SmurfTracker.h"
-#include "json.hpp"
+#include <algorithm>
+#include <array>
+#include <cctype>
+#include <optional>
+#include <regex>
 #include <set>
+#include <string_view>
 #include "url_encode.h"
 
 BAKKESMOD_PLUGIN(SmurfTracker, "Identify Smurfs.", plugin_version, PLUGINTYPE_FREEPLAY)
@@ -17,6 +22,23 @@ std::string getCurrentTime() {
 }
 
 namespace {
+constexpr const char* kWinsSearching = "Searching...";
+constexpr const char* kWinsNotFound = "Not found";
+constexpr const char* kWinsUnavailable = "Unavailable";
+constexpr float kRlStatsRequestDelaySeconds = 1.0f;
+
+enum class RlStatsOutcome {
+	Success,
+	NotFound,
+	Unavailable
+};
+
+struct RlStatsResponse {
+	RlStatsOutcome outcome = RlStatsOutcome::Unavailable;
+	std::string wins;
+	std::string reason;
+};
+
 std::string GetRlStatsPlatformName(const UniqueIDWrapper& uniqueID, const std::string& fallbackPlatform)
 {
 	switch (uniqueID.GetPlatform()) {
@@ -49,6 +71,141 @@ std::string GetRlStatsProfileLookupId(const UniqueIDWrapper& uniqueID, const std
 		return !epicAccountId.empty() ? epicAccountId : playerName;
 	default:
 		return playerName;
+	}
+}
+
+std::string ToLowerCopy(std::string_view value)
+{
+	std::string lowered(value);
+	std::transform(lowered.begin(), lowered.end(), lowered.begin(), [](unsigned char ch) {
+		return static_cast<char>(std::tolower(ch));
+		});
+	return lowered;
+}
+
+bool ContainsCaseInsensitive(std::string_view haystack, std::string_view needle)
+{
+	return ToLowerCopy(haystack).find(ToLowerCopy(needle)) != std::string::npos;
+}
+
+bool LooksLikeChallengePage(const std::string& html)
+{
+	static const std::array<std::string_view, 5> kChallengeMarkers = {
+		"Just a moment...",
+		"Attention Required! | Cloudflare",
+		"__cf_chl_",
+		"cf-challenge",
+		"turnstile",
+	};
+
+	for (const auto marker : kChallengeMarkers) {
+		if (ContainsCaseInsensitive(html, marker)) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+std::optional<std::string_view> ExtractStatsSection(const std::string& html)
+{
+	const std::string lowered = ToLowerCopy(html);
+	size_t statsIdPos = lowered.find("id=\"stats\"");
+	if (statsIdPos == std::string::npos) {
+		statsIdPos = lowered.find("id='stats'");
+	}
+	if (statsIdPos == std::string::npos) {
+		return std::nullopt;
+	}
+
+	const size_t sectionStart = lowered.rfind("<section", statsIdPos);
+	const size_t sectionEnd = lowered.find("</section>", statsIdPos);
+	if (sectionStart == std::string::npos || sectionEnd == std::string::npos) {
+		return std::nullopt;
+	}
+
+	constexpr size_t closingSectionLength = 10; // strlen("</section>")
+	return std::string_view(html).substr(sectionStart, sectionEnd - sectionStart + closingSectionLength);
+}
+
+std::optional<std::string> ExtractWinsFromHtmlChunk(const std::string& htmlChunk)
+{
+	static const std::regex kWinsCellRegex(
+		R"(<td[^>]*>\s*([0-9][0-9,]*)\s+Wins\s*</td>)",
+		std::regex::icase
+	);
+	static const std::regex kWinsTextRegex(
+		R"(([0-9][0-9,]*)\s+Wins\b)",
+		std::regex::icase
+	);
+
+	std::smatch match;
+	if (std::regex_search(htmlChunk, match, kWinsCellRegex)) {
+		return match[1].str();
+	}
+	if (std::regex_search(htmlChunk, match, kWinsTextRegex)) {
+		return match[1].str();
+	}
+
+	return std::nullopt;
+}
+
+std::optional<std::string> ExtractWinsFromHtml(const std::string& html)
+{
+	if (html.empty()) {
+		return std::nullopt;
+	}
+
+	if (const auto statsSection = ExtractStatsSection(html)) {
+		if (const auto wins = ExtractWinsFromHtmlChunk(std::string(*statsSection))) {
+			return wins;
+		}
+	}
+
+	return ExtractWinsFromHtmlChunk(html);
+}
+
+std::string BuildRlStatsProfileUrl(const PlayerDetails& player)
+{
+	const std::string lookupId = player.profileLookupId.empty() ? player.playerName : player.profileLookupId;
+	return "https://rlstats.net/profile/" + player.platform + "/" + urlEncode(lookupId);
+}
+
+RlStatsResponse ParseRlStatsResponse(int httpCode, const std::string& responseBody)
+{
+	if (httpCode == 404) {
+		return { RlStatsOutcome::NotFound, "", "RLStats profile returned HTTP 404" };
+	}
+
+	if (httpCode != 200) {
+		return { RlStatsOutcome::Unavailable, "", "RLStats request failed with HTTP " + std::to_string(httpCode) };
+	}
+
+	if (responseBody.empty()) {
+		return { RlStatsOutcome::Unavailable, "", "RLStats returned an empty response body" };
+	}
+
+	if (LooksLikeChallengePage(responseBody)) {
+		return { RlStatsOutcome::Unavailable, "", "RLStats returned a challenge page" };
+	}
+
+	if (const auto wins = ExtractWinsFromHtml(responseBody)) {
+		return { RlStatsOutcome::Success, *wins, "" };
+	}
+
+	return { RlStatsOutcome::NotFound, "", "RLStats wins field not found in HTML response" };
+}
+
+std::string GetDisplayWinsValue(const RlStatsResponse& response)
+{
+	switch (response.outcome) {
+	case RlStatsOutcome::Success:
+		return response.wins;
+	case RlStatsOutcome::NotFound:
+		return kWinsNotFound;
+	case RlStatsOutcome::Unavailable:
+	default:
+		return kWinsUnavailable;
 	}
 }
 }
@@ -87,11 +244,6 @@ void SmurfTracker::onLoad()
 	cvarManager->registerCvar("SmurfTracker_mode", "0", "SmurfTracker selected mode", true, true, 0, true, 2)
 		.addOnValueChanged([this](std::string oldValue, CVarWrapper cvar) {
 		selectedMode = cvar.getIntValue();
-	});
-
-	cvarManager->registerCvar("SmurfTracker_ip", "127.0.0.1", "IP Address for SmurfTracker endpoint", true, true, 0, true, 15)
-		.addOnValueChanged([this](std::string oldValue, CVarWrapper cvar) {
-		ipAddress = cvar.getStringValue();
 	});
 
 	cvarManager->registerCvar("SmurfTracker_check_teammates", "1", "Check teammates stats", true, true, 0, true, 1)
@@ -367,9 +519,6 @@ void SmurfTracker::HTTPRequest()
 
 	*processPlayer = [this, processPlayer](std::shared_ptr<std::set<std::string>> processedPlayers) {
 		for (auto& player : currentPlayers) {
-			std::string ipAddress = cvarManager->getCvar("SmurfTracker_ip").getStringValue();
-			std::string url = "http://" + ipAddress + ":8191/v1";
-			std::string platform = player.platform;
 			std::string lookupId = player.profileLookupId.empty() ? player.playerName : player.profileLookupId;
 			if (processedPlayers->count(lookupId)) {
 				continue; // Skip already processed players
@@ -381,62 +530,59 @@ void SmurfTracker::HTTPRequest()
 			processedPlayers->insert(lookupId);
 			player.requested = true;
 
-			std::string targetUrl = "https://rlstats.net/profile/" + platform + "/" + urlEncode(lookupId);
-			player.wins = "Searching...";
+			std::string targetUrl = BuildRlStatsProfileUrl(player);
+			player.wins = kWinsSearching;
 			LOG("Requesting stats for: " + player.playerName + " using RLStats lookup id: " + lookupId);
 
-			nlohmann::json data;
-			data["cmd"] = "request.get";
-			data["url"] = targetUrl;
-			data["maxTimeout"] = 60000;
-
-			LOG(getCurrentTime() + " Sending stats request: " + targetUrl);
-
 			CurlRequest req;
-			req.url = url;
-			req.body = data.dump();
-			req.headers["Content-Type"] = "application/json";
+			req.url = targetUrl;
+			req.verb = "GET";
+			req.headers["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8";
+			req.headers["Accept-Language"] = "en-US,en;q=0.9";
+			req.headers["Cache-Control"] = "no-cache";
+			req.headers["Pragma"] = "no-cache";
+			req.headers["User-Agent"] =
+				"Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+				"AppleWebKit/537.36 (KHTML, like Gecko) "
+				"Chrome/132.0.0.0 Safari/537.36";
 
 			auto weakProcessPlayer = std::weak_ptr<std::function<void(std::shared_ptr<std::set<std::string>>)>>
 				(processPlayer);
 
-			HttpWrapper::SendCurlRequest(req, [this, weakProcessPlayer, processedPlayers, lookupId](int code, std::string response) {
+			HttpWrapper::SendCurlRequest(req, [this, weakProcessPlayer, processedPlayers, lookupId, targetUrl](int code, std::string response) {
 				if (auto processPlayer = weakProcessPlayer.lock()) {
-					if (code == 200) {
-						try {
-							auto response_data = nlohmann::json::parse(response);
-							std::string wins = response_data["wins"];
-							for (auto& p : currentPlayers) {
-								if (p.profileLookupId == lookupId) {
-									p.wins = wins;
-									LOG(p.playerName + " - Wins: " + wins);
-									break;
-								}
-							}
-						}
-						catch (const nlohmann::json::exception& e) {
-							LOG(std::string("JSON parsing error: ") + e.what());
-							for (auto& p : currentPlayers) {
-								if (p.profileLookupId == lookupId) {
-									p.wins = "Error";
-									break;
-								}
-							}
-						}
-					}
-					else {
-						LOG("Request failed with code: " + std::to_string(code));
-						for (auto& p : currentPlayers) {
-							if (p.profileLookupId == lookupId) {
-								p.wins = "Error: " + std::to_string(code);
-								break;
-							}
-						}
-					}
+					RlStatsResponse result = ParseRlStatsResponse(code, response);
 
-					gameWrapper->SetTimeout([processPlayer, processedPlayers](...) {
-						(*processPlayer)(processedPlayers);
-						}, 1.0f);
+					gameWrapper->Execute([this, processPlayer, processedPlayers, lookupId, targetUrl, code, result = std::move(result)](GameWrapper* gameWrapper) {
+						const std::string winsValue = GetDisplayWinsValue(result);
+						bool updatedAnyPlayers = false;
+
+						for (auto& player : currentPlayers) {
+							if (player.profileLookupId == lookupId) {
+								player.wins = winsValue;
+								updatedAnyPlayers = true;
+							}
+						}
+
+						if (result.outcome == RlStatsOutcome::Success) {
+							LOG("Resolved RLStats wins for lookupId " + lookupId + ": " + result.wins);
+						}
+						else {
+							LOG(
+								"RLStats lookup failed for " + lookupId +
+								" (" + targetUrl + "): " + result.reason +
+								" [HTTP " + std::to_string(code) + "]"
+							);
+						}
+
+						if (!updatedAnyPlayers) {
+							LOG("No current player entry found for lookupId " + lookupId + " while applying RLStats response");
+						}
+
+						gameWrapper->SetTimeout([processPlayer, processedPlayers](GameWrapper*) {
+							(*processPlayer)(processedPlayers);
+							}, kRlStatsRequestDelaySeconds);
+						});
 				}
 				});
 
