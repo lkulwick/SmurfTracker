@@ -16,6 +16,7 @@ struct PlayerDetails {
 	std::string playerName;
 	std::string platform;
 	std::string uniqueID;
+	std::string profileLookupId;
 	std::string wins = "0";
 	std::string mmr = "0";
 	bool requested = false;

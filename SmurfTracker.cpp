@@ -16,6 +16,43 @@ std::string getCurrentTime() {
 	return ss.str();
 }
 
+namespace {
+std::string GetRlStatsPlatformName(const UniqueIDWrapper& uniqueID, const std::string& fallbackPlatform)
+{
+	switch (uniqueID.GetPlatform()) {
+	case OnlinePlatform_Steam:
+		return "Steam";
+	case OnlinePlatform_PS4:
+		return "PS4";
+	case OnlinePlatform_Dingo:
+		return "Xbox";
+	case OnlinePlatform_Epic:
+		return "Epic";
+	default:
+		return fallbackPlatform == "XboxOne" ? "Xbox" : fallbackPlatform;
+	}
+}
+
+std::string GetRlStatsProfileLookupId(const UniqueIDWrapper& uniqueID, const std::string& playerName)
+{
+	const auto platform = uniqueID.GetPlatform();
+	const auto uid = uniqueID.GetUID();
+	const auto epicAccountId = uniqueID.GetEpicAccountID();
+
+	switch (platform) {
+	case OnlinePlatform_Steam:
+		return uid > 0 ? std::to_string(uid) : playerName;
+	case OnlinePlatform_PS4:
+	case OnlinePlatform_Dingo:
+		return uid > 0 ? std::to_string(uid) : playerName;
+	case OnlinePlatform_Epic:
+		return !epicAccountId.empty() ? epicAccountId : playerName;
+	default:
+		return playerName;
+	}
+}
+}
+
 void SmurfTracker::LogF(const std::string& message) {
 	if (logFile.is_open()) {
 		logFile << "[" << getCurrentTime() << "] " << message << std::endl;
@@ -158,6 +195,7 @@ void SmurfTracker::InitializeCurrentPlayers()
 		details.team = playerWrapper.GetTeamNum();  // 0 is blue, 1 is orange 11
 		details.mmr = std::to_string(static_cast<int>(std::round(gameWrapper->GetMMRWrapper().GetPlayerMMR(playerWrapper.GetUniqueIdWrapper(), 11))));// 11 is playlist ID for ranked 2v2
 		details.wins = "Waiting..."; // Default value	
+		details.profileLookupId = GetRlStatsProfileLookupId(uniqueID, details.playerName);
 
 		// Find separators
 		size_t firstSeparator = uniqueIDString.find('|');
@@ -171,8 +209,17 @@ void SmurfTracker::InitializeCurrentPlayers()
 
 		std::string uniqueIDPart = uniqueIDString.substr(firstSeparator + 1, secondSeparator - firstSeparator - 1);
 		int playerIndex = static_cast<int>(std::stoi(uniqueIDString.substr(secondSeparator + 1)));
-		std::string platform = uniqueIDString.substr(0, firstSeparator);
+		std::string platform = GetRlStatsPlatformName(uniqueID, uniqueIDString.substr(0, firstSeparator));
 		details.platform = platform;
+
+		LOG(
+			"Resolved RLStats lookup for {0}: platform={1}, lookupId={2}, uid={3}, idString={4}",
+			details.playerName,
+			details.platform,
+			details.profileLookupId,
+			std::to_string(uniqueID.GetUID()),
+			uniqueIDString
+		);
 
 		// If this is a main player, store the details
 		if (playerIndex == 0) {
@@ -321,23 +368,23 @@ void SmurfTracker::HTTPRequest()
 
 	*processPlayer = [this, processPlayer](std::shared_ptr<std::set<std::string>> processedPlayers) {
 		for (auto& player : currentPlayers) {
-			if (processedPlayers->count(player.playerName)) {
+			std::string ipAddress = cvarManager->getCvar("SmurfTracker_ip").getStringValue();
+			std::string url = "http://" + ipAddress + ":8191/v1";
+			std::string platform = player.platform;
+			std::string lookupId = player.profileLookupId.empty() ? player.playerName : player.profileLookupId;
+			if (processedPlayers->count(lookupId)) {
 				continue; // Skip already processed players
 			}
 			if (player.requested) {
 				continue; // Skip players that have already been requested
 			}
 
-			processedPlayers->insert(player.playerName);
+			processedPlayers->insert(lookupId);
 			player.requested = true;
 
-			std::string ipAddress = cvarManager->getCvar("SmurfTracker_ip").getStringValue();
-			std::string url = "http://" + ipAddress + ":8191/v1";
-			std::string platform = player.platform == "XboxOne" ? "Xbox" : player.platform;
-			std::string playerName = player.playerName;
-			std::string targetUrl = "https://rlstats.net/profile/" + platform + "/" + urlEncode(playerName);
+			std::string targetUrl = "https://rlstats.net/profile/" + platform + "/" + urlEncode(lookupId);
 			player.wins = "Searching...";
-			LOG("Requesting stats for: " + playerName);
+			LOG("Requesting stats for: " + player.playerName + " using RLStats lookup id: " + lookupId);
 
 			nlohmann::json data;
 			data["cmd"] = "request.get";
@@ -354,16 +401,16 @@ void SmurfTracker::HTTPRequest()
 			auto weakProcessPlayer = std::weak_ptr<std::function<void(std::shared_ptr<std::set<std::string>>)>>
 				(processPlayer);
 
-			HttpWrapper::SendCurlRequest(req, [this, weakProcessPlayer, processedPlayers, playerName](int code, std::string response) {
+			HttpWrapper::SendCurlRequest(req, [this, weakProcessPlayer, processedPlayers, lookupId](int code, std::string response) {
 				if (auto processPlayer = weakProcessPlayer.lock()) {
 					if (code == 200) {
 						try {
 							auto response_data = nlohmann::json::parse(response);
 							std::string wins = response_data["wins"];
 							for (auto& p : currentPlayers) {
-								if (p.playerName == playerName) {
+								if (p.profileLookupId == lookupId) {
 									p.wins = wins;
-									LOG(playerName + " - Wins: " + wins);
+									LOG(p.playerName + " - Wins: " + wins);
 									break;
 								}
 							}
@@ -371,7 +418,7 @@ void SmurfTracker::HTTPRequest()
 						catch (const nlohmann::json::exception& e) {
 							LOG(std::string("JSON parsing error: ") + e.what());
 							for (auto& p : currentPlayers) {
-								if (p.playerName == playerName) {
+								if (p.profileLookupId == lookupId) {
 									p.wins = "Error";
 									break;
 								}
@@ -381,7 +428,7 @@ void SmurfTracker::HTTPRequest()
 					else {
 						LOG("Request failed with code: " + std::to_string(code));
 						for (auto& p : currentPlayers) {
-							if (p.playerName == playerName) {
+							if (p.profileLookupId == lookupId) {
 								p.wins = "Error: " + std::to_string(code);
 								break;
 							}
